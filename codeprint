@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""codeprint CODE — print a 6-8 digit code in the middle of an 80mm ticket."""
+
+import os
+import socket
+import sys
+
+PRINTER_IP = os.environ.get("PRINTER_IP", "10.99.10.81")
+PRINTER_PORT = int(os.environ.get("PRINTER_PORT", "9100"))
+
+# Same dot grid thermprint uses for GS v 0 notes: 576 dots across, 203 dpi.
+WIDTH = 576
+HEIGHT = 80 * 8
+
+# 5x7, scaled up so a digit is about a double-height Font A cell, and thick.
+FONT = {
+    "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
+    "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
+    "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
+    "3": ["11110", "00001", "00001", "01110", "00001", "00001", "11110"],
+    "4": ["00010", "00110", "01010", "10010", "11111", "00010", "00010"],
+    "5": ["11111", "10000", "10000", "11110", "00001", "00001", "11110"],
+    "6": ["01110", "10000", "10000", "11110", "10001", "10001", "01110"],
+    "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
+    "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
+    "9": ["01110", "10001", "10001", "01111", "00001", "00001", "01110"],
+}
+SX, SY, GAP = 5, 7, 10
+
+
+def render(code: str) -> bytearray:
+    glyph_w, glyph_h = 5 * SX, 7 * SY
+    total_w = len(code) * glyph_w + (len(code) - 1) * GAP
+    x0 = (WIDTH - total_w) // 2
+    y0 = (HEIGHT - glyph_h) // 2
+    row_bytes = WIDTH // 8
+    buf = bytearray(row_bytes * HEIGHT)
+
+    def dot(x: int, y: int) -> None:
+        buf[y * row_bytes + (x >> 3)] |= 0x80 >> (x & 7)
+
+    for i, ch in enumerate(code):
+        gx = x0 + i * (glyph_w + GAP)
+        for row, bits in enumerate(FONT[ch]):
+            for col, bit in enumerate(bits):
+                if bit != "1":
+                    continue
+                for dy in range(SY):
+                    for dx in range(SX):
+                        dot(gx + col * SX + dx, y0 + row * SY + dy)
+    return buf
+
+
+def build(code: str) -> bytes:
+    row_bytes = WIDTH // 8
+    return (
+        b"\x1b@"
+        + b"\x1ba\x01"
+        + b"\x1dv0\x00"
+        + bytes((row_bytes & 0xFF, row_bytes >> 8, HEIGHT & 0xFF, HEIGHT >> 8))
+        + render(code)
+        + b"\x1dV\x01"
+    )
+
+
+def ink_box(code: str) -> tuple[int, int, int, int]:
+    buf = render(code)
+    row_bytes = WIDTH // 8
+    xs: list[int] = []
+    ys: list[int] = []
+    for y in range(HEIGHT):
+        row = buf[y * row_bytes : (y + 1) * row_bytes]
+        for x in range(WIDTH):
+            if row[x >> 3] & (0x80 >> (x & 7)):
+                xs.append(x)
+                ys.append(y)
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def main() -> int:
+    if len(sys.argv) != 2 or not sys.argv[1].isdigit() or not 6 <= len(sys.argv[1]) <= 8:
+        print("usage: codeprint CODE   (6-8 digits)", file=sys.stderr)
+        return 2
+    data = build(sys.argv[1])
+    dump = os.environ.get("CODEPRINT_DUMP")
+    if dump:
+        with open(dump, "wb") as handle:
+            handle.write(data)
+        return 0
+    with socket.create_connection((PRINTER_IP, PRINTER_PORT), timeout=10) as sock:
+        sock.sendall(data)
+    print(f"Printed {sys.argv[1]} to {PRINTER_IP}:{PRINTER_PORT}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
